@@ -11,3 +11,4 @@
 *.jks
 *.keystore
 gen/
+/app/release/
