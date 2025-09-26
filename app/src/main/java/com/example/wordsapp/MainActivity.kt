@@ -6,7 +6,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -16,7 +15,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -54,7 +52,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
@@ -71,190 +68,147 @@ import com.example.wordsapp.database.WordEntity
 import com.example.wordsapp.ui.theme.WordsAppTheme
 import com.example.wordsapp.viewmodel.WordViewModel
 import com.example.wordsapp.viewmodel.WordViewModelFactory
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+//---------- Main entry point of the app ----------
 class MainActivity : ComponentActivity() {
-    private lateinit var tts: TextToSpeech
+    private lateinit var tts: TextToSpeech // tool that lets phone speak words
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Initialize Room database
+
+        // Create database (Room saves all words here)
         val db = Room.databaseBuilder(
             applicationContext, AppDatabase::class.java, "word-database"
         ).build()
-// Initialize TextToSpeech engine
+
+        //Create Text-to-Speech engine
         tts = TextToSpeech(this) {
-            if (it == TextToSpeech.SUCCESS) tts.language = Locale.US
+            if (it == TextToSpeech.SUCCESS) {
+                tts.language = Locale.US // set English voice
+            }
         }
-// Set up Compose UI
+
+        //Show the Compose UI
         setContent {
             WordsAppTheme {
+                // Pass database and speak function into the main screen
                 WordApp(
-                    wordDao = db.wordDao(), speak = { text ->
-                        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
-                    })
+                    wordDao = db.wordDao(),
+                    speak = { text -> tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) }
+                )
             }
         }
     }
-
+//Cleanup
     override fun onDestroy() {
-        // Clean up TextToSpeech resources
-        tts.stop();
-        tts.shutdown();
+        // Stop and close Text-to-Speech when app closes
+        tts.stop()
+        tts.shutdown()
         super.onDestroy()
     }
 }
 
-/**
- * Main composable that manages the app's state and UI
- */
+//---------- Main screen of the app ----------
 @Composable
-fun WordApp(
-    wordDao: WordDao, speak: (String) -> Unit
-) {
-    /* ---------- State Management ---------- */
-
-    // Initialize ViewModel with WordDao
+fun WordApp(wordDao: WordDao, speak: (String) -> Unit) {
+    // Connect ViewModel to database
+    //Give me a WordViewModel.
+    //If it already exists, reuse it.
+    // If not, create it with this factory that knows how to pass the database.
+    // Keep it alive even if the screen rotates.
     val viewModel: WordViewModel = viewModel(factory = WordViewModelFactory(wordDao))
 
+    //All state variables that UI can react to
+    //For state of Celebration
     var showCelebration by remember { mutableStateOf(false) }
+
+    //This line subscribes my Composable to the ViewModels state
+    //Whenever the ViewModel pushes new data, the UI automatically updates
     val state by viewModel.state.collectAsState()
-    // Coroutine scope for animations and async operations
+
     val scope = rememberCoroutineScope()
-    // Animation state for card swipe
-    val swipeOffset = remember { Animatable(0f) }
-    // Current word index in learning list
-    var currentIndex by remember { mutableStateOf(0) }
-    // Whether to show translation on card
-    var showTranslation by remember { mutableStateOf(false) }
-    // Description text for current word
-    var descriptionText by remember { mutableStateOf("Loading description…") }
-    // Filter known words from state
-    val learningWords = state.words.filter { !it.isKnown }
-    // Get current word safely (handles index out of bounds)
+
+    // Animations for card
+    val swipeOffset = remember { Animatable(0f) } // how far card is moved left/right
+    val cardAlpha = remember { Animatable(1f) }   // card transparency
+    val cardScale = remember { Animatable(1f) }   // card size
+
+    var currentIndex by remember { mutableStateOf(0) }    // number of current word
+    var showTranslation by remember { mutableStateOf(false) } // if Russian shown
+    var descriptionText by remember { mutableStateOf("Loading…") } // explanation text
+    val learningWords = state.words.filter { !it.isKnown } // only unknown words
     val currentWord = learningWords.getOrNull(currentIndex.coerceAtMost(learningWords.lastIndex))
-    // Dialog control states
-    var showAllWordsDialog by remember { mutableStateOf(false) }
-    // New word input fields
-    var newWordEn by remember { mutableStateOf("") }   // English text field
-    var newWordRu by remember { mutableStateOf("") }   // Russian text field
-    // Keyboard controller for hiding keyboard
+
+    var showAllWordsDialog by remember { mutableStateOf(false) } // control dialog
+    var newWordEn by remember { mutableStateOf("") } // input field English
+    var newWordRu by remember { mutableStateOf("") } // input field Russian
     val keyboard = LocalSoftwareKeyboardController.current
-// to new visualisation card appear/dissaper
-    val cardAlpha = remember { Animatable(1f) }
-    val cardScale = remember { Animatable(1f) }
-    var isAnimatingTransition by remember { mutableStateOf(false) }
 
-    // color states near your other animation states
-    val successColor = Color(0xFF4CAF50)  // Green for "Know It"
-    val skipColor = Color(0xFFF44336)     // Red for "Don't Know"
-    val neutralColor = Color(0xFFF8F9FA)  // Default card color
+    var isDragging by remember { mutableStateOf(false) } // true when swiping card
+    var hasSpokenFirstWord by remember { mutableStateOf(false) } // avoid auto-speak first word
 
-// Track current swipe direction color
+    // Card colors
+    val successColor = Color(0xFF4CAF50) // green
+    val skipColor = Color(0xFFF44336)    // red
+    val neutralColor = Color(0xFFF8F9FA) // grey
     var cardColor by remember { mutableStateOf(neutralColor) }
 
-
-    // Track when to show celebration
+    // Celebration (like confetti) comes from ViewModel
     LaunchedEffect(viewModel) {
-        viewModel.successTracker.celebrationTrigger.collect { shouldCelebrate ->
-            showCelebration = shouldCelebrate
+        viewModel.successTracker.celebrationTrigger.collect {
+            showCelebration = it
         }
     }
 
-    /* ---------- Side Effects ---------- */
-
-    /**
-     * Auto-translation effect: When English text changes, fetch Russian translation
-     */
+    // Auto-translate: when user types English, get Russian translation
     LaunchedEffect(newWordEn) {
-        if (newWordEn.isNotBlank()) {
-            // suspend fun quickTranslate() runs on IO thread; fills ru field
-            newWordRu = viewModel.quickTranslate(newWordEn.trim())
-        } else {
-            newWordRu = ""              // clear when English cleared
-        }
+        newWordRu = if (newWordEn.isNotBlank()) {
+            viewModel.translateWord(newWordEn.trim())
+        } else ""
     }
 
-    /**
-     * Description fetch effect: When current word changes, fetch its description
-     */
+    // Fetch description when word changes
     LaunchedEffect(currentWord?.id) {
         showTranslation = false
         descriptionText = currentWord?.let { viewModel.fetchDescription(it.english) } ?: ""
     }
-    // Track if user is currently dragging the card
-    var isDragging by remember { mutableStateOf(false) }   // true only while finger down & moving
 
-    // Track if first word has been spoken (to avoid speaking on initial load)
-    var hasSpokenFirstWord by remember { mutableStateOf(false) }
-
-    /**
-     * Text-to-speech effect: Speak current word when it changes
-     */
+    // Speak new word when it changes (not first one)
     LaunchedEffect(currentWord?.id) {
         if (currentWord == null) return@LaunchedEffect
-
         if (!hasSpokenFirstWord) {
-            // Mark that first word has been loaded but DON'T speak it yet
             hasSpokenFirstWord = true
         } else {
-            // Speak on subsequent word changes only
             delay(300)
             speak(currentWord.english)
         }
     }
 
-    /* ---------- Animation Calculations ---------- */
-
-    // Convert card width to pixels for swipe threshold calculations
-    val widthPx = LocalDensity.current.run { 240.dp.toPx() }
-    // Swipe threshold (25% of card width)
-    val swipeThreshold = widthPx * 0.25f
-    // Base card color
-    val baseColor = Color(0xFFF8F9FA)
-
-// Calculate tint alpha (0 to max 0.3f)
-
-    val absOffset = kotlin.math.abs(swipeOffset.value)
-    val isDecision = absOffset > swipeThreshold        // True when in the "zone"
-
-// Tint alpha ramps from 0 → 0.3  until threshold, then snaps to 0.8 (solid)
-    val tintAlpha = if (isDecision) 0.8f               // solid colour in zone
-    else (absOffset / swipeThreshold) * 0.3f
-
-    val tintColor = when {
-        swipeOffset.value < 0f -> Color.Red.copy(alpha = tintAlpha)
-        swipeOffset.value > 0f -> Color.Green.copy(alpha = tintAlpha)
-        else -> Color.Transparent
-    }
-
-// Final blended background colour
-    val backgroundColor = lerp(baseColor, tintColor, tintAlpha)
-// Desired size while dragging (1f = normal, 1.10f = +10 %)
-    val targetScale = if (isDragging) 1.10f else 1f          // make it bigger here
-
-// Animate between 1f and 1.10f with a spring for a smooth “bounce-in/out”
+    // Animate card bigger when dragging
+    val targetScale = if (isDragging) 1.1f else 1f
     val animatedScale by animateFloatAsState(
-        targetValue = targetScale, animationSpec = spring(
-            stiffness = Spring.StiffnessMediumLow,           // smoothness
-            dampingRatio = Spring.DampingRatioNoBouncy       // no overshoot
-        ), label = "card-scale"
+        targetValue = targetScale,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy),
+        label = "card-scale"
     )
 
-    /* ---------- Main UI Layout ---------- */
-
+    // ---------- Layout ----------
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Add-word field
         Spacer(Modifier.height(26.dp))
+
+        // Input field: English word
         OutlinedTextField(
             value = newWordEn,
             onValueChange = { newWordEn = it },
@@ -263,14 +217,13 @@ fun WordApp(
             shape = RoundedCornerShape(6.dp),
         )
 
-        /*  Show second field **only** after user starts typing English  */
+        // Show Russian input only if English is not empty
         if (newWordEn.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
-
             OutlinedTextField(
                 value = newWordRu,
-                onValueChange = { newWordRu = it },        // user can edit freely
-                label = { Text("Translation (edit if needed)") },
+                onValueChange = { newWordRu = it },
+                label = { Text("Translation") },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(6.dp),
             )
@@ -278,44 +231,31 @@ fun WordApp(
 
         Spacer(Modifier.height(12.dp))
 
-        // Action buttons row
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(24.dp)  // space between children
-        ) {
-            // Add new word button
+        // Buttons row (Add / Show all words)
+        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Button(
                 onClick = {
                     if (newWordEn.isNotBlank()) {
-                        // save with user-edited (or auto) translation
                         viewModel.addWord(newWordEn.trim(), newWordRu.trim())
-                        // clear fields for next entry
                         newWordEn = ""
                         newWordRu = ""
-                        // hide soft keyboard
                         keyboard?.hide()
                     }
                 },
                 shape = RoundedCornerShape(6.dp),
-                modifier = Modifier.padding(vertical = 12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3F51B5))
-            ) {
-                Text("Add new word")
-            }
-            // Show all words button
+            ) { Text("Add new word") }
+
             Button(
                 onClick = { showAllWordsDialog = true },
                 shape = RoundedCornerShape(6.dp),
-                modifier = Modifier.padding(vertical = 12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color.Gray)
-            ) {
-                Text("Show all words")
-            }
+            ) { Text("Show all words") }
         }
 
         Spacer(Modifier.weight(1.2f))
 
-        // Word description text
-        Spacer(Modifier.height(32.dp))
+        // Show description
         Text(
             text = descriptionText,
             style = MaterialTheme.typography.bodyLarge,
@@ -323,170 +263,43 @@ fun WordApp(
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
+
         Spacer(Modifier.weight(1.2f))
 
-
+        // Celebration popup
         CelebrationPopup(
             show = showCelebration,
             onDismiss = {
                 viewModel.successTracker.resetCelebration()
                 showCelebration = false
             }
-
-
         )
 
-        /* ---- Learning Card Section ---- */
+        // If we have a word → show flashcard
         if (currentWord != null) {
-            val widthPx = LocalDensity.current.run { 240.dp.toPx() }
-            val swipeThreshold = widthPx * .25f
+            WordCard(
+                currentWord = currentWord,
+                speak = speak,
+                showTranslation = showTranslation,
+                setShowTranslation = { showTranslation = it },
+                swipeOffset = swipeOffset,
+                cardAlpha = cardAlpha,
+                cardScale = cardScale,
+                animatedScale = animatedScale,
+                isDragging = isDragging,
+                setIsDragging = { isDragging = it },
+                viewModel = viewModel,
+                currentIndex = currentIndex,
+                setCurrentIndex = { currentIndex = it },
+                learningWords = learningWords,
+                scope = scope,
+                cardColor = cardColor,
+                setCardColor = { cardColor = it },
+                successColor = successColor,
+                skipColor = skipColor,
+                neutralColor = neutralColor
+            )
 
-            // Word card with tap + swipe
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
-                    .offset { IntOffset(swipeOffset.value.roundToInt(), 0) }
-                    .graphicsLayer {
-
-                        // Fade effect based on swipe distance
-                        alpha = 1f - (kotlin.math.min(
-                            kotlin.math.abs(swipeOffset.value) / (swipeThreshold * 2f),
-                            0.6f
-                        ))
-
-                        // Scale effect
-                        scaleX = animatedScale
-                        scaleY = animatedScale
-                    }
-
-
-                    // Tap gesture to show translation
-                    .pointerInput(currentWord.id) {
-                        detectTapGestures(
-
-                            onTap = {
-                                showTranslation = true
-                                speak(currentWord.english) // speak only on tap (finger down + up without move)
-                            })
-                    }
-                    .pointerInput(currentWord.id) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val drag = event.changes.firstOrNull()
-
-                                if (drag != null && drag.pressed) {
-                                    showTranslation = true
-                                    isDragging = true
-
-                                    var totalDrag = 0f
-                                    while (drag.pressed) {
-                                        val e2 = awaitPointerEvent()
-                                        val c = e2.changes.firstOrNull() ?: break
-                                        val dx = c.positionChange().x
-                                        totalDrag += dx
-
-
-                                        //  color based on direction
-                                        cardColor = when {
-                                            totalDrag > swipeThreshold -> successColor
-                                            totalDrag < -swipeThreshold -> skipColor
-                                            else -> neutralColor
-                                        }
-                                        scope.launch {
-                                            swipeOffset.snapTo(swipeOffset.value + dx)
-                                            // Make card shrink/fade as it moves
-                                            cardAlpha.snapTo(1f - (abs(swipeOffset.value) / widthPx))
-                                            cardScale.snapTo(1f - (abs(swipeOffset.value) / (widthPx * 2)))
-                                        }
-                                        c.consume()
-                                        if (!c.pressed) break
-                                    }
-
-                                    // Check swipe threshold
-                                    if (abs(totalDrag) > swipeThreshold) {
-                                        isAnimatingTransition = true
-                                        scope.launch {
-                                            // 1. Faster exit animation (changed from spring to tween)
-                                            cardColor = neutralColor
-                                            swipeOffset.animateTo(
-                                                targetValue = if (totalDrag > 0) widthPx * 1.5f else -widthPx * 1.5f,
-                                                animationSpec = tween(
-                                                    durationMillis = 150,  // Faster exit (was 300+)
-                                                    easing = LinearEasing
-                                                )
-                                            )
-                                            cardAlpha.animateTo(0f, tween(100))
-                                            cardScale.animateTo(0.7f, tween(100))
-
-                                            // Update word index (no delay here)
-                                            if (totalDrag > 0) viewModel.markWordAsKnown(currentWord.id)
-                                            else {
-                                                currentIndex =
-                                                    (currentIndex + 1) % learningWords.size
-                                                viewModel.resthere()
-                                            }
-
-                                            // 2. Faster entry animation
-                                            swipeOffset.snapTo(if (totalDrag > 0) -widthPx / 2 else widthPx / 2) // Start closer to center
-                                            cardAlpha.snapTo(0.4f) // Start less transparent
-                                            cardScale.snapTo(0.85f) // Start larger
-
-                                            // Animate new card in quickly
-                                            swipeOffset.animateTo(
-                                                0f,
-                                                tween(
-                                                    durationMillis = 200,  // Faster entry
-                                                    easing = FastOutSlowInEasing
-                                                )
-                                            )
-                                            cardAlpha.animateTo(1f, tween(150))
-                                            cardScale.animateTo(1f, tween(150))
-
-                                            isAnimatingTransition = false
-                                        }
-                                    } else {
-                                        scope.launch {
-                                            // Return to center if not enough swipe
-                                            swipeOffset.animateTo(0f)
-                                            cardAlpha.animateTo(1f)
-                                            cardScale.animateTo(1f)
-                                        }
-                                    }
-                                    isDragging = false
-                                }
-                            }
-                        }
-                    }
-                    .graphicsLayer {
-                        alpha = cardAlpha.value
-                        scaleX = cardScale.value
-                        scaleY = cardScale.value
-
-                    },
-                colors = CardDefaults.cardColors(
-                    containerColor = cardColor
-                )
-
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    // Display word (and translation if shown)
-                    Text(
-                        text = if (showTranslation) currentWord.english + "  -  " + currentWord.russian else currentWord.english,
-                        style = MaterialTheme.typography.headlineMedium,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-
-            // Control buttons row
             Spacer(Modifier.height(15.dp))
 
             // Speak button
@@ -495,116 +308,217 @@ fun WordApp(
                     imageVector = Icons.Rounded.VolumeUp,
                     contentDescription = "Speak word",
                     modifier = Modifier.size(36.dp),
-                    tint = Color(0xFF3F51B5) // nice modern blue
+                    tint = Color(0xFF3F51B5)
                 )
             }
-
-
 
             Spacer(Modifier.height(10.dp))
             Text("Word ${currentIndex + 1} of ${learningWords.size}", color = Color.Gray)
         } else {
-            Text("Add your first word using the field above!", color = Color.White, fontSize = 17.sp)
+            // If no words
+            Text("Add your first word above!", color = Color.White, fontSize = 17.sp)
             Spacer(Modifier.height(74.dp))
         }
     }
-    /* ---- All Words Dialog ---- */
+
+    // Dialog with all words
     if (showAllWordsDialog) {
         AllWordsDialog(
             words = state.words,
-            learningWords = learningWords, // Pass your filtered list
+            learningWords = learningWords,
             onDismiss = { showAllWordsDialog = false },
-            onDelete = { id ->
-                viewModel.deleteWord(id)
-                // showAllWordsDialog = false
-            },
-            onMarkUnknown = { id ->
-                viewModel.markWordAsUnknown(id)
-                // showAllWordsDialog = false
-            })
+            onDelete = { id -> viewModel.deleteWord(id) },
+            onMarkUnknown = { id -> viewModel.markWordAsUnknown(id) }
+        )
     }
 }
 
-/* ---- All Words FUN ---- */
+// ---------- Flashcard (tap or swipe) ----------
+@Composable
+fun WordCard(
+    currentWord: WordEntity,
+    speak: (String) -> Unit,
+    showTranslation: Boolean,
+    setShowTranslation: (Boolean) -> Unit,
+    swipeOffset: Animatable<Float, *>,
+    cardAlpha: Animatable<Float, *>,
+    cardScale: Animatable<Float, *>,
+    animatedScale: Float,
+    isDragging: Boolean,
+    setIsDragging: (Boolean) -> Unit,
+    viewModel: WordViewModel,
+    currentIndex: Int,
+    setCurrentIndex: (Int) -> Unit,
+    learningWords: List<WordEntity>,
+    scope: CoroutineScope,
+    cardColor: Color,
+    setCardColor: (Color) -> Unit,
+    successColor: Color,
+    skipColor: Color,
+    neutralColor: Color
+) {
+    val widthPx = LocalDensity.current.run { 240.dp.toPx() }
+    val swipeThreshold = widthPx * 0.25f
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .offset { IntOffset(swipeOffset.value.roundToInt(), 0) }
+            .graphicsLayer {
+                alpha = 1f - (abs(swipeOffset.value) / (swipeThreshold * 2f)).coerceAtMost(0.6f)
+                scaleX = animatedScale
+                scaleY = animatedScale
+            }
+            // Tap shows translation + speaks
+            .pointerInput(currentWord.id) {
+                detectTapGestures(onTap = {
+                    setShowTranslation(true)
+                    speak(currentWord.english)
+                })
+            }
+            // Handle swipe gestures
+            .pointerInput(currentWord.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val drag = event.changes.firstOrNull()
+
+                        if (drag != null && drag.pressed) {
+                            setShowTranslation(true)
+                            setIsDragging(true)
+                            var totalDrag = 0f
+                            while (drag.pressed) {
+                                val e2 = awaitPointerEvent()
+                                val c = e2.changes.firstOrNull() ?: break
+                                val dx = c.positionChange().x
+                                totalDrag += dx
+
+                                // Change color while dragging
+                                setCardColor(
+                                    when {
+                                        totalDrag > swipeThreshold -> successColor
+                                        totalDrag < -swipeThreshold -> skipColor
+                                        else -> neutralColor
+                                    }
+                                )
+
+                                // Move card
+                                scope.launch {
+                                    swipeOffset.snapTo(swipeOffset.value + dx)
+                                    cardAlpha.snapTo(1f - (abs(swipeOffset.value) / widthPx))
+                                    cardScale.snapTo(1f - (abs(swipeOffset.value) / (widthPx * 2)))
+                                }
+                                c.consume()
+                                if (!c.pressed) break
+                            }
+
+                            // Decide after swipe
+                            if (abs(totalDrag) > swipeThreshold) {
+                                scope.launch {
+                                    setCardColor(neutralColor)
+                                    swipeOffset.animateTo(
+                                        if (totalDrag > 0) widthPx * 1.5f else -widthPx * 1.5f,
+                                        tween(150)
+                                    )
+                                    cardAlpha.animateTo(0f, tween(100))
+                                    cardScale.animateTo(0.7f, tween(100))
+
+                                    if (totalDrag > 0) {
+                                        viewModel.markWordAsKnown(currentWord.id)
+                                    } else {
+                                        setCurrentIndex((currentIndex + 1) % learningWords.size)
+                                        viewModel.resthere()
+                                    }
+
+                                    // Bring new card in
+                                    swipeOffset.snapTo(if (totalDrag > 0) -widthPx / 2 else widthPx / 2)
+                                    cardAlpha.snapTo(0.4f)
+                                    cardScale.snapTo(0.85f)
+                                    swipeOffset.animateTo(0f, tween(200, easing = FastOutSlowInEasing))
+                                    cardAlpha.animateTo(1f, tween(150))
+                                    cardScale.animateTo(1f, tween(150))
+                                }
+                            } else {
+                                scope.launch {
+                                    swipeOffset.animateTo(0f)
+                                    cardAlpha.animateTo(1f)
+                                    cardScale.animateTo(1f)
+                                }
+                            }
+                            setIsDragging(false)
+                        }
+                    }
+                }
+            }
+            .graphicsLayer {
+                alpha = cardAlpha.value
+                scaleX = cardScale.value
+                scaleY = cardScale.value
+            },
+        colors = CardDefaults.cardColors(containerColor = cardColor)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = if (showTranslation)
+                    "${currentWord.english}  -  ${currentWord.russian}"
+                else currentWord.english,
+                style = MaterialTheme.typography.headlineMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+// ---------- Dialog with all words ----------
 @Composable
 fun AllWordsDialog(
     words: List<WordEntity>,
-    learningWords: List<WordEntity>, // to see that card in working set
+    learningWords: List<WordEntity>,
     onDismiss: () -> Unit,
     onDelete: (Int) -> Unit,
     onMarkUnknown: (Int) -> Unit
 ) {
     AlertDialog(
-        onDismissRequest = onDismiss, modifier = Modifier
-            .fillMaxWidth(0.95f) // Takes 95% of screen width
-            .padding(0.dp,0.dp),
+        onDismissRequest = onDismiss,
+        modifier = Modifier.fillMaxWidth(0.95f),
         shape = RoundedCornerShape(10.dp),
-        title = { Text("All Words") }, text = {
-            Box(Modifier.padding(0.dp).heightIn(max = 600.dp)  ) {
-                LazyColumn (    ){
+        title = { Text("All Words") },
+        text = {
+            Box(Modifier.heightIn(max = 600.dp)) {
+                LazyColumn {
                     items(words) { word ->
                         val isInLearningSet = learningWords.any { it.id == word.id }
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(0.dp,4.dp),
-
+                                .padding(vertical = 4.dp),
                             elevation = CardDefaults.cardElevation(12.dp)
                         ) {
-                            Column(modifier = Modifier.padding(8.dp)) {
-
-                                Text(
-                                    text = "${word.english}   -   " + "${word.russian}",
-                                    style = MaterialTheme.typography.bodyLarge
-                                )
-
+                            Column(Modifier.padding(8.dp)) {
+                                Text("${word.english} - ${word.russian}", style = MaterialTheme.typography.bodyLarge)
                                 if (isInLearningSet) {
-                                    Text(
-                                        text = "In working set",
-                                        color = Color(0xFF388E3C), // Green color
-                                        style = MaterialTheme.typography.labelSmall,
-                                        modifier = Modifier.padding(start = 8.dp)
-                                    )
+                                    Text("In working set", color = Color(0xFF388E3C), style = MaterialTheme.typography.labelSmall)
                                 }
-
-
-
                                 Spacer(Modifier.height(6.dp))
-                                //Text(text = "${word.russian}")
                                 Row {
                                     Button(
                                         onClick = { onMarkUnknown(word.id) },
-
-                                        modifier = Modifier
-                                            .height(35.dp)
-                                            .padding(end = 8.dp),
+                                        modifier = Modifier.height(35.dp),
                                         shape = RoundedCornerShape(5.dp),
-                                        contentPadding = PaddingValues(
-                                            horizontal = 8.dp,
-                                            vertical = 4.dp
-                                        ),
-
-
-                                    ) {
-                                        Text(
-                                            "Add to Study",
-                                            //style = MaterialTheme.typography.labelSmall
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    ) { Text("Add to Study") }
+                                    Spacer(Modifier.width(8.dp))
                                     Button(
                                         onClick = { onDelete(word.id) },
-                                        modifier = Modifier
-                                            .height(35.dp)
-                                            .padding(end = 8.dp),
+                                        modifier = Modifier.height(35.dp),
                                         shape = RoundedCornerShape(5.dp),
-                                        contentPadding = PaddingValues(
-                                            horizontal = 4.dp, vertical = 0.dp
-                                        ),
-                                    ) {
-                                        Text("Delete")
-                                    }
+                                    ) { Text("Delete") }
                                 }
                             }
                         }
@@ -615,20 +529,12 @@ fun AllWordsDialog(
         confirmButton = {
             Button(
                 onClick = onDismiss,
-                modifier = Modifier.padding(4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = Color.White
                 ),
-                shape = RoundedCornerShape(4.dp),
-                elevation = ButtonDefaults.buttonElevation(
-                    defaultElevation = 2.dp,
-                    pressedElevation = 4.dp
-                )
-            ) {
-                Text("Close", style = MaterialTheme.typography.labelLarge)
-            }
+                shape = RoundedCornerShape(4.dp)
+            ) { Text("Close") }
         }
-
     )
 }

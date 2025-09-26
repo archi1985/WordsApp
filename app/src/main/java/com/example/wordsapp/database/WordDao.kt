@@ -6,12 +6,19 @@ import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
-@Dao
+/**
+WordDao = the commands for the words table.
+oom fills in the real SQL behind these functions.
+ */
+
+@Dao //marks this interface as a Data Access Object for Room
 interface WordDao {
     @Query("SELECT * FROM words")
+    //Flow - if the database changes, Room will automatically send a new list
     fun getAllWords(): Flow<List<WordEntity>>
 
     @Insert
+    //suspend - runs in coroutine and above I do not need suspend because Flow is already the same
     suspend fun insert(word: WordEntity)
 
     @Update

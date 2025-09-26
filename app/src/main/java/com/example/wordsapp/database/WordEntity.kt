@@ -1,5 +1,4 @@
 package com.example.wordsapp.database
-
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -7,6 +6,6 @@ import androidx.room.PrimaryKey
 data class WordEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val english: String,
-    val russian: String, // Store multiple translations here, comma-separated, e.g. "дом, здание, жильё"
+    val russian: String, // Store multiple translations here, comma-separated
     val isKnown: Boolean = false
 )
