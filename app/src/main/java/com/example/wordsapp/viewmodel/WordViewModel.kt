@@ -20,7 +20,8 @@ Author: Arkadii Zahorulko 2025
 WordViewModel keeps track of all words (from DB) inside _state.
 Gives a read-only version (state) to UI
 Updates state automatically whenever DB changes
-Also provides helpers like translationService and successTracker
+Also provides helpers like translationService and successtracker
+(after 10 times win in row it shows animation)
  */
 
 //holder for values

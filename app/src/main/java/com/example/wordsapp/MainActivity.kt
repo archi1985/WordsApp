@@ -2,43 +2,28 @@ package com.example.wordsapp
 
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.VolumeUp
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -47,139 +32,186 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.room.Room
 import com.example.wordsapp.database.AppDatabase
 import com.example.wordsapp.database.WordDao
-import com.example.wordsapp.database.WordEntity
 import com.example.wordsapp.ui.theme.WordsAppTheme
 import com.example.wordsapp.viewmodel.WordViewModel
 import com.example.wordsapp.viewmodel.WordViewModelFactory
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.roundToInt
 
-//---------- Main entry point of the app ----------
-class MainActivity : ComponentActivity() {
-    private lateinit var tts: TextToSpeech // tool that lets phone speak words
+class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Create database (Room saves all words here)
         val db = Room.databaseBuilder(
-            applicationContext, AppDatabase::class.java, "word-database"
+            applicationContext,
+            AppDatabase::class.java,
+            "word-database"
         ).build()
 
-        //Create Text-to-Speech engine
-        tts = TextToSpeech(this) {
-            if (it == TextToSpeech.SUCCESS) {
-                tts.language = Locale.US // set English voice
-            }
-        }
+        tts = TextToSpeech(this, this)
 
-        //Show the Compose UI
         setContent {
             WordsAppTheme {
-                // Pass database and speak function into the main screen
                 WordApp(
                     wordDao = db.wordDao(),
-                    speak = { text -> tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) }
+                    speak = { text -> speakWord(text) }
                 )
             }
         }
     }
-//Cleanup
+
+    override fun onInit(status: Int) {
+        Log.d("WordsAppTTS", "onInit status = $status")
+
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts?.setLanguage(Locale.US)
+            Log.d("WordsAppTTS", "setLanguage result = $result")
+
+            ttsReady = result != TextToSpeech.LANG_MISSING_DATA &&
+                    result != TextToSpeech.LANG_NOT_SUPPORTED
+        } else {
+            Log.e("WordsAppTTS", "TTS init FAILED, status = $status")
+            ttsReady = false
+        }
+    }
+
+    private fun speakWord(text: String) {
+        Log.d("WordsAppTTS", "speakWord('$text'), ttsReady=$ttsReady")
+
+        val engine = tts ?: return
+        if (!ttsReady) return
+        if (text.isBlank()) return
+
+        try {
+            val result = engine.speak(
+                text,
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                "word-${text.hashCode()}"
+            )
+            Log.d("WordsAppTTS", "tts.speak() result = $result")
+        } catch (e: Exception) {
+            Log.e("WordsAppTTS", "tts.speak() exception: ${e.message}")
+        }
+    }
+
     override fun onDestroy() {
-        // Stop and close Text-to-Speech when app closes
-        tts.stop()
-        tts.shutdown()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
         super.onDestroy()
     }
 }
 
-//---------- Main screen of the app ----------
+// ---------- main screen ----------
 @Composable
 fun WordApp(wordDao: WordDao, speak: (String) -> Unit) {
-    // Connect ViewModel to database
-    //Give me a WordViewModel.
-    //If it already exists, reuse it.
-    // If not, create it with this factory that knows how to pass the database.
-    // Keep it alive even if the screen rotates.
+    // get our ViewModel that talks to the database (via wordDao)
     val viewModel: WordViewModel = viewModel(factory = WordViewModelFactory(wordDao))
 
-    //All state variables that UI can react to
-    //For state of Celebration
+    // controls if we show a celebration screen
     var showCelebration by remember { mutableStateOf(false) }
 
-    //This line subscribes my Composable to the ViewModels state
-    //Whenever the ViewModel pushes new data, the UI automatically updates
+    // take the current UI state from ViewModel (state is a flow!)
+    // collectAsState() turns it into a compose state that updates the UI automatically
+    // jsut to more easier access to the data.
     val state by viewModel.state.collectAsState()
 
+    // A scope to run coroutines from inside composables
+    // like not only work in composable, but always
     val scope = rememberCoroutineScope()
 
-    // Animations for card
-    val swipeOffset = remember { Animatable(0f) } // how far card is moved left/right
-    val cardAlpha = remember { Animatable(1f) }   // card transparency
-    val cardScale = remember { Animatable(1f) }   // card size
+    // animation values for the card:
 
-    var currentIndex by remember { mutableStateOf(0) }    // number of current word
-    var showTranslation by remember { mutableStateOf(false) } // if Russian shown
-    var descriptionText by remember { mutableStateOf("Loading…") } // explanation text
-    val learningWords = state.words.filter { !it.isKnown } // only unknown words
+    val swipeOffset = remember { Animatable(0.1f) }
+    val cardAlpha = remember { Animatable(0.8f) }
+    val cardScale = remember { Animatable(0.95f) }
+
+    // index of the current word in the learning list
+    var currentIndex by remember { mutableStateOf(0) }
+
+    // show or not translation (show only after user click on card)
+    var showTranslation by remember { mutableStateOf(false) }
+
+    // text for the description under the word
+    var descriptionText by remember { mutableStateOf("Loading…") }
+
+    // take only words that are not known yet.
+    // learningWords is the list of words the user is still studying.
+    val learningWords = state.words.filter { !it.isKnown }
+
+    // safely get the current word by index
+    // coerceAtMost(lastIndex) makes sure we never get index that not exist in list
     val currentWord = learningWords.getOrNull(currentIndex.coerceAtMost(learningWords.lastIndex))
 
-    var showAllWordsDialog by remember { mutableStateOf(false) } // control dialog
-    var newWordEn by remember { mutableStateOf("") } // input field English
-    var newWordRu by remember { mutableStateOf("") } // input field Russian
+    // index for bottom navigation  0 or 1, to know what to show if rotated etc.
+    var selectedIndex by rememberSaveable { mutableStateOf(0) }
+
+    // text fields for adding a new word
+    var newWordEn by remember { mutableStateOf("") }
+    var newWordRu by remember { mutableStateOf("") }
+
+    // asccess to the software keyboard so we can hide it after adding a word
     val keyboard = LocalSoftwareKeyboardController.current
 
-    var isDragging by remember { mutableStateOf(false) } // true when swiping card
-    var hasSpokenFirstWord by remember { mutableStateOf(false) } // avoid auto-speak first word
+    // true when user is swiping the card right now
+    var isDragging by remember { mutableStateOf(false) }
 
-    // Card colors
-    val successColor = Color(0xFF4CAF50) // green
-    val skipColor = Color(0xFFF44336)    // red
-    val neutralColor = Color(0xFFF8F9FA) // grey
+    // to make sure text to speach reads the word only the first time it appears,
+    // not every recomposition.
+    var hasSpokenFirstWord by remember { mutableStateOf(false) }
+
+    // colors for swipe feedback:
+    // successColor = I know this word
+    // skipColor = I don’t know / skip
+    // neutralColor = default card color
+    val successColor = Color(0xFF4CAF50)
+    val skipColor = Color(0xFFF44336)
+    val neutralColor = Color.Gray
+
+    // current card background color that changes depending on swipe direction
     var cardColor by remember { mutableStateOf(neutralColor) }
 
-    // Celebration (like confetti) comes from ViewModel
     LaunchedEffect(viewModel) {
         viewModel.successTracker.celebrationTrigger.collect {
             showCelebration = it
         }
     }
 
-    // Auto-translate: when user types English, get Russian translation
     LaunchedEffect(newWordEn) {
         newWordRu = if (newWordEn.isNotBlank()) {
             viewModel.translateWord(newWordEn.trim())
         } else ""
     }
 
-    // Fetch description when word changes
     LaunchedEffect(currentWord?.id) {
         showTranslation = false
         descriptionText = currentWord?.let { viewModel.fetchDescription(it.english) } ?: ""
+
+        // return card to normal state
+        swipeOffset.snapTo(0f)
+        cardAlpha.snapTo(1f)
+        cardScale.snapTo(1f)
+        cardColor = neutralColor
     }
 
-    // Speak new word when it changes (not first one)
     LaunchedEffect(currentWord?.id) {
         if (currentWord == null) return@LaunchedEffect
         if (!hasSpokenFirstWord) {
@@ -190,351 +222,157 @@ fun WordApp(wordDao: WordDao, speak: (String) -> Unit) {
         }
     }
 
-    // Animate card bigger when dragging
     val targetScale = if (isDragging) 1.1f else 1f
     val animatedScale by animateFloatAsState(
         targetValue = targetScale,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy),
+        animationSpec = spring(
+            stiffness = Spring.StiffnessMediumLow,
+            dampingRatio = Spring.DampingRatioNoBouncy
+        ),
         label = "card-scale"
     )
 
-    // ---------- Layout ----------
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Spacer(Modifier.height(26.dp))
-
-        // Input field: English word
-        OutlinedTextField(
-            value = newWordEn,
-            onValueChange = { newWordEn = it },
-            label = { Text("Enter English word") },
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(6.dp),
-        )
-
-        // Show Russian input only if English is not empty
-        if (newWordEn.isNotBlank()) {
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = newWordRu,
-                onValueChange = { newWordRu = it },
-                label = { Text("Translation") },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(6.dp),
-            )
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        // Buttons row (Add / Show all words)
-        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-            Button(
-                onClick = {
-                    if (newWordEn.isNotBlank()) {
-                        viewModel.addWord(newWordEn.trim(), newWordRu.trim())
-                        newWordEn = ""
-                        newWordRu = ""
-                        keyboard?.hide()
-                    }
-                },
-                shape = RoundedCornerShape(6.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3F51B5))
-            ) { Text("Add new word") }
-
-            Button(
-                onClick = { showAllWordsDialog = true },
-                shape = RoundedCornerShape(6.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Gray)
-            ) { Text("Show all words") }
-        }
-
-        Spacer(Modifier.weight(1.2f))
-
-        // Show description
-        Text(
-            text = descriptionText,
-            style = MaterialTheme.typography.bodyLarge,
-            color = Color.Gray,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Spacer(Modifier.weight(1.2f))
-
-        // Celebration popup
-        CelebrationPopup(
-            show = showCelebration,
-            onDismiss = {
-                viewModel.successTracker.resetCelebration()
-                showCelebration = false
-            }
-        )
-
-        // If we have a word → show flashcard
-        if (currentWord != null) {
-            WordCard(
-                currentWord = currentWord,
-                speak = speak,
-                showTranslation = showTranslation,
-                setShowTranslation = { showTranslation = it },
-                swipeOffset = swipeOffset,
-                cardAlpha = cardAlpha,
-                cardScale = cardScale,
-                animatedScale = animatedScale,
-                isDragging = isDragging,
-                setIsDragging = { isDragging = it },
-                viewModel = viewModel,
-                currentIndex = currentIndex,
-                setCurrentIndex = { currentIndex = it },
-                learningWords = learningWords,
-                scope = scope,
-                cardColor = cardColor,
-                setCardColor = { cardColor = it },
-                successColor = successColor,
-                skipColor = skipColor,
-                neutralColor = neutralColor
-            )
-
-            Spacer(Modifier.height(15.dp))
-
-            // Speak button
-            IconButton(onClick = { speak(currentWord.english) }) {
-                Icon(
-                    imageVector = Icons.Rounded.VolumeUp,
-                    contentDescription = "Speak word",
-                    modifier = Modifier.size(36.dp),
-                    tint = Color(0xFF3F51B5)
-                )
-            }
-
-            Spacer(Modifier.height(10.dp))
-            Text("Word ${currentIndex + 1} of ${learningWords.size}", color = Color.Gray)
-        } else {
-            // If no words
-            Text("Add your first word above!", color = Color.White, fontSize = 17.sp)
-            Spacer(Modifier.height(74.dp))
-        }
-    }
-
-    // Dialog with all words
-    if (showAllWordsDialog) {
-        AllWordsDialog(
-            words = state.words,
-            learningWords = learningWords,
-            onDismiss = { showAllWordsDialog = false },
-            onDelete = { id -> viewModel.deleteWord(id) },
-            onMarkUnknown = { id -> viewModel.markWordAsUnknown(id) }
-        )
-    }
-}
-
-// ---------- Flashcard (tap or swipe) ----------
-@Composable
-fun WordCard(
-    currentWord: WordEntity,
-    speak: (String) -> Unit,
-    showTranslation: Boolean,
-    setShowTranslation: (Boolean) -> Unit,
-    swipeOffset: Animatable<Float, *>,
-    cardAlpha: Animatable<Float, *>,
-    cardScale: Animatable<Float, *>,
-    animatedScale: Float,
-    isDragging: Boolean,
-    setIsDragging: (Boolean) -> Unit,
-    viewModel: WordViewModel,
-    currentIndex: Int,
-    setCurrentIndex: (Int) -> Unit,
-    learningWords: List<WordEntity>,
-    scope: CoroutineScope,
-    cardColor: Color,
-    setCardColor: (Color) -> Unit,
-    successColor: Color,
-    skipColor: Color,
-    neutralColor: Color
-) {
-    val widthPx = LocalDensity.current.run { 240.dp.toPx() }
-    val swipeThreshold = widthPx * 0.25f
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(180.dp)
-            .offset { IntOffset(swipeOffset.value.roundToInt(), 0) }
-            .graphicsLayer {
-                alpha = 1f - (abs(swipeOffset.value) / (swipeThreshold * 2f)).coerceAtMost(0.6f)
-                scaleX = animatedScale
-                scaleY = animatedScale
-            }
-            // Tap shows translation + speaks
-            .pointerInput(currentWord.id) {
-                detectTapGestures(onTap = {
-                    setShowTranslation(true)
-                    speak(currentWord.english)
-                })
-            }
-            // Handle swipe gestures
-            .pointerInput(currentWord.id) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val drag = event.changes.firstOrNull()
-
-                        if (drag != null && drag.pressed) {
-                            setShowTranslation(true)
-                            setIsDragging(true)
-                            var totalDrag = 0f
-                            while (drag.pressed) {
-                                val e2 = awaitPointerEvent()
-                                val c = e2.changes.firstOrNull() ?: break
-                                val dx = c.positionChange().x
-                                totalDrag += dx
-
-                                // Change color while dragging
-                                setCardColor(
-                                    when {
-                                        totalDrag > swipeThreshold -> successColor
-                                        totalDrag < -swipeThreshold -> skipColor
-                                        else -> neutralColor
-                                    }
-                                )
-
-                                // Move card
-                                scope.launch {
-                                    swipeOffset.snapTo(swipeOffset.value + dx)
-                                    cardAlpha.snapTo(1f - (abs(swipeOffset.value) / widthPx))
-                                    cardScale.snapTo(1f - (abs(swipeOffset.value) / (widthPx * 2)))
-                                }
-                                c.consume()
-                                if (!c.pressed) break
-                            }
-
-                            // Decide after swipe
-                            if (abs(totalDrag) > swipeThreshold) {
-                                scope.launch {
-                                    setCardColor(neutralColor)
-                                    swipeOffset.animateTo(
-                                        if (totalDrag > 0) widthPx * 1.5f else -widthPx * 1.5f,
-                                        tween(150)
-                                    )
-                                    cardAlpha.animateTo(0f, tween(100))
-                                    cardScale.animateTo(0.7f, tween(100))
-
-                                    if (totalDrag > 0) {
-                                        viewModel.markWordAsKnown(currentWord.id)
-                                    } else {
-                                        setCurrentIndex((currentIndex + 1) % learningWords.size)
-                                        viewModel.resthere()
-                                    }
-
-                                    // Bring new card in
-                                    swipeOffset.snapTo(if (totalDrag > 0) -widthPx / 2 else widthPx / 2)
-                                    cardAlpha.snapTo(0.4f)
-                                    cardScale.snapTo(0.85f)
-                                    swipeOffset.animateTo(0f, tween(200, easing = FastOutSlowInEasing))
-                                    cardAlpha.animateTo(1f, tween(150))
-                                    cardScale.animateTo(1f, tween(150))
-                                }
-                            } else {
-                                scope.launch {
-                                    swipeOffset.animateTo(0f)
-                                    cardAlpha.animateTo(1f)
-                                    cardScale.animateTo(1f)
-                                }
-                            }
-                            setIsDragging(false)
-                        }
-                    }
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        bottomBar = {
+            BottomAppBar {
+                NavigationBar (){
+                    NavigationBarItem(
+                        selected = selectedIndex == 0,
+                        onClick = { selectedIndex = 0 },
+                        icon = { },
+                        label = { Text("Study",fontSize = 18.sp ) }
+                    )
+                    NavigationBarItem(
+                        selected = selectedIndex == 1,
+                        onClick = { selectedIndex = 1 },
+                        icon = { },
+                        label = { Text("Words",fontSize = 18.sp ) }
+                    )
                 }
             }
-            .graphicsLayer {
-                alpha = cardAlpha.value
-                scaleX = cardScale.value
-                scaleY = cardScale.value
-            },
-        colors = CardDefaults.cardColors(containerColor = cardColor)
-    ) {
+        }
+    ) { innerPadding ->
         Column(
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(innerPadding)
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(
-                text = if (showTranslation)
-                    "${currentWord.english}  -  ${currentWord.russian}"
-                else currentWord.english,
-                style = MaterialTheme.typography.headlineMedium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
+            Spacer(Modifier.height(26.dp))
+
+            if (selectedIndex == 0) {
+                // ---------- study screen ----------
+                OutlinedTextField(
+                    value = newWordEn,
+                    onValueChange = { newWordEn = it },
+                    label = { Text("Enter English word") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(6.dp),
+                )
+
+                if (newWordEn.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newWordRu,
+                        onValueChange = { newWordRu = it },
+                        label = { Text("Translation") },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(6.dp),
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    Button(
+                        onClick = {
+                            if (newWordEn.isNotBlank()) {
+                                viewModel.addWord(newWordEn.trim(), newWordRu.trim())
+                                newWordEn = ""
+                                newWordRu = ""
+                                keyboard?.hide()
+                            }
+                        },
+                        shape = RoundedCornerShape(6.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3F51B5))
+                    ) { Text("Add new word") }
+                }
+
+                Spacer(Modifier.weight(1.2f))
+
+                Text(
+                    text = descriptionText,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.Gray,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(Modifier.weight(1.2f))
+
+                CelebrationPopup(
+                    show = showCelebration,
+                    onDismiss = {
+                        viewModel.successTracker.resetCelebration()
+                        showCelebration = false
+                    }
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                if (currentWord != null) {
+                    WordCard(   // из другого файла
+                        currentWord = currentWord,
+                        speak = speak,
+                        showTranslation = showTranslation,
+                        setShowTranslation = { showTranslation = it },
+                        swipeOffset = swipeOffset,
+                        cardAlpha = cardAlpha,
+                        cardScale = cardScale,
+                        animatedScale = animatedScale,
+                        isDragging = isDragging,
+                        setIsDragging = { isDragging = it },
+                        viewModel = viewModel,
+                        currentIndex = currentIndex,
+                        setCurrentIndex = { currentIndex = it },
+                        learningWords = learningWords,
+                        scope = scope,
+                        cardColor = cardColor,
+                        setCardColor = { cardColor = it },
+                        successColor = successColor,
+                        skipColor = skipColor,
+                        neutralColor = neutralColor
+                    )
+
+                    Spacer(Modifier.height(15.dp))
+
+                    IconButton(onClick = { speak(currentWord.english) }) {
+                        Icon(
+                            imageVector = Icons.Rounded.VolumeUp,
+                            contentDescription = "Speak word",
+                            modifier = Modifier.size(38.dp),
+                            tint = Color(0xFF3F51B5)
+                        )
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    Text("Word ${currentIndex + 1} of ${learningWords.size}", color = Color.Gray)
+                } else {
+                    Text("Add your first word above!", color = Color.White, fontSize = 17.sp)
+                    Spacer(Modifier.height(74.dp))
+                }
+            } else {
+                // ---------- экран Words ----------
+                WordsScreen(         // из другого файла
+                    words = state.words,
+                    learningWords = learningWords,
+                    onMarkUnknown = { id -> viewModel.markWordAsUnknown(id) },
+                    onDelete = { id -> viewModel.deleteWord(id) }
+                )
+            }
         }
     }
-}
-
-// ---------- Dialog with all words ----------
-@Composable
-fun AllWordsDialog(
-    words: List<WordEntity>,
-    learningWords: List<WordEntity>,
-    onDismiss: () -> Unit,
-    onDelete: (Int) -> Unit,
-    onMarkUnknown: (Int) -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth(0.95f),
-        shape = RoundedCornerShape(10.dp),
-        title = { Text("All Words") },
-        text = {
-            Box(Modifier.heightIn(max = 600.dp)) {
-                LazyColumn {
-                    items(words) { word ->
-                        val isInLearningSet = learningWords.any { it.id == word.id }
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            elevation = CardDefaults.cardElevation(12.dp)
-                        ) {
-                            Column(Modifier.padding(8.dp)) {
-                                Text("${word.english} - ${word.russian}", style = MaterialTheme.typography.bodyLarge)
-                                if (isInLearningSet) {
-                                    Text("In working set", color = Color(0xFF388E3C), style = MaterialTheme.typography.labelSmall)
-                                }
-                                Spacer(Modifier.height(6.dp))
-                                Row {
-                                    Button(
-                                        onClick = { onMarkUnknown(word.id) },
-                                        modifier = Modifier.height(35.dp),
-                                        shape = RoundedCornerShape(5.dp),
-                                    ) { Text("Add to Study") }
-                                    Spacer(Modifier.width(8.dp))
-                                    Button(
-                                        onClick = { onDelete(word.id) },
-                                        modifier = Modifier.height(35.dp),
-                                        shape = RoundedCornerShape(5.dp),
-                                    ) { Text("Delete") }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = onDismiss,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = Color.White
-                ),
-                shape = RoundedCornerShape(4.dp)
-            ) { Text("Close") }
-        }
-    )
 }
